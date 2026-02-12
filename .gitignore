@@ -1,0 +1,18 @@
+# Private Kerio VPN configuration (company-specific)
+kerio/
+
+# Credentials and secrets
+*.pem
+*.key
+*.crt
+credentials.toml
+server.yaml
+client.yaml
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
