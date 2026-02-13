@@ -39,11 +39,13 @@ Run each setup script in order:
 # SSH tunneling
 sudo bash scripts/01-ssh-tunneling/setup.sh
 
-# 3x-ui panel (VLESS Reality)
-sudo bash scripts/02-3xui/setup.sh
+# 3x-ui panel (VLESS Reality) — pick ONE:
+sudo bash scripts/02-3xui/setup.sh           # Option A: native install
+# docker compose -f docker/docker-compose.yml up -d x-ui  # Option B: Docker
 
-# TrustTunnel
-sudo bash scripts/03-trusttunnel/setup.sh
+# TrustTunnel — pick ONE:
+sudo bash scripts/03-trusttunnel/setup.sh     # Option A: native install
+# docker compose -f docker/docker-compose.yml up -d trusttunnel  # Option B: Docker
 
 # Paqet
 sudo bash scripts/04-paqet/setup.sh ens3
@@ -95,10 +97,16 @@ scripts/
 └── 06-monitoring/
     ├── setup.sh                 # fail2ban, vnstat, cron logging
     └── check-usage.sh           # Per-protocol usage report
+docker/                              # Docker alternative (3x-ui + TrustTunnel only)
+├── docker-compose.yml           # Both services
+├── init-data.sh                 # Initialize config volumes
+└── trusttunnel/
+    └── Dockerfile               # TrustTunnel container image
 docs/
 ├── VPS-SELECTION.md             # VPS provider recommendations
 ├── USER-GUIDE.md                # Client setup for all protocols
-└── ADMIN-GUIDE.md               # Server maintenance and troubleshooting
+├── ADMIN-GUIDE.md               # Server maintenance and troubleshooting
+└── DOCKER-SETUP.md              # Docker installation + usage
 ```
 
 ## Monitoring
@@ -130,6 +138,7 @@ Designed for **~10 users** (1-3 people, up to 3 devices each, ~20 concurrent dev
 - **Users:** [`docs/USER-GUIDE.md`](docs/USER-GUIDE.md) — per-protocol client setup for Android, iOS, Windows, macOS, Linux
 - **Admins:** [`docs/ADMIN-GUIDE.md`](docs/ADMIN-GUIDE.md) — user management, monitoring, credential rotation, troubleshooting
 - **VPS selection:** [`docs/VPS-SELECTION.md`](docs/VPS-SELECTION.md) — provider comparison, specs, location advice
+- **Docker:** [`docs/DOCKER-SETUP.md`](docs/DOCKER-SETUP.md) — optional Docker setup for 3x-ui and TrustTunnel
 
 ## Security Notes
 

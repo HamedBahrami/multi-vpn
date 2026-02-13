@@ -1,6 +1,9 @@
 # Private Kerio VPN configuration (company-specific)
 kerio/
 
+# Docker runtime data (volumes, databases, certs)
+docker/data/
+
 # Credentials and secrets
 *.pem
 *.key
