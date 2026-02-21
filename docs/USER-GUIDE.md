@@ -112,11 +112,26 @@ Use **sing-box** to create a TUN interface that routes everything through paqet'
 2. Use this config template (adjust as needed):
    ```json
    {
-     "inbounds": [{"type": "tun", "address": ["172.19.0.1/30"], "auto_route": true, "strict_route": false}],
-     "outbounds": [{"type": "socks", "tag": "paqet", "server": "127.0.0.1", "server_port": 1080, "udp_over_tcp": false}],
-     "route": {"rules": [{"process_name": ["paqet.exe"], "outbound": "direct"}], "auto_detect_interface": true}
+     "dns": {
+       "servers": [{"tag": "remote-dns", "address": "udp://1.1.1.1", "detour": "paqet"}],
+       "final": "remote-dns"
+     },
+     "inbounds": [{"type": "tun", "address": ["172.19.0.1/30"], "auto_route": true, "strict_route": false, "sniff": true}],
+     "outbounds": [
+       {"type": "socks", "tag": "paqet", "server": "127.0.0.1", "server_port": 1080},
+       {"type": "direct", "tag": "direct"}
+     ],
+     "route": {
+       "rules": [
+         {"action": "hijack-dns", "protocol": "dns"},
+         {"process_name": ["paqet.exe"], "outbound": "direct"}
+       ],
+       "final": "paqet",
+       "auto_detect_interface": true
+     }
    }
    ```
+   > **Note:** Use Cloudflare DNS (`1.1.1.1`) — Google DNS (`8.8.8.8`) can route to CDN edges that return 503 errors on sites like X.com.
 3. Run sing-box, then all traffic goes through the VPS
 
 ---
