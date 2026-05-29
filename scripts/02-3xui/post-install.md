@@ -106,17 +106,35 @@ Good SNI choices (high-traffic sites that support TLS 1.3 + H2):
 
 | SNI | Notes |
 |-----|-------|
-| `www.google.com` | Most reliable, widely used |
-| `www.microsoft.com` | Good alternative |
-| `www.apple.com` | Works well |
-| `dl.google.com` | Download-like traffic pattern |
-| `www.samsung.com` | Less common, may avoid detection |
+| `www.microsoft.com` | High cover traffic in Iran (Windows Update, Office). Larger cert chain. |
+| `www.apple.com` / `gateway.icloud.com` | Smaller cert chain — better when ISPs fingerprint by handshake size. |
+| `www.cloudflare.com` | Tiny ECDSA cert, smallest handshake. Good fallback. |
+| `discord.com` | Moderate. Discord is reachable in Iran. |
+| `www.samsung.com` | Less common, lower detection volume. |
+
+**Avoid:** `www.google.com`, `www.youtube.com`, anything Google-owned — frequently blocked/throttled by Iranian DPI, which causes REALITY's initial forward-to-real-site to fail.
 
 **Test SNI from server:**
 ```bash
 # Should return TLS handshake success
-curl -I --resolve www.google.com:443:<server-ip> https://www.google.com
+curl -I --resolve <sni>:443:<server-ip> https://<sni>
 ```
+
+### When Reality stops working (2025 reality)
+
+Iranian DPI started fingerprinting Reality's TLS pattern in late 2024 and detection has improved through 2025. Symptoms when this happens:
+
+- Client gets TCP connection to the inbound port, but the TLS handshake stalls
+- On the server: `ss -tn '( dport = :443 )'` shows large `Send-Q` to the client (server is replying, client never ACKs)
+- Server-side xray logs are silent (no error — connection just times out)
+
+Mitigations to try, cheapest first:
+1. **Switch to a smaller-cert SNI** (icloud.com, cloudflare.com) — sometimes enough on its own
+2. **Move the inbound off port 443** (try `2087`, `2096`, `8443`) — DPI policy is sometimes port-specific
+3. **Front behind Cloudflare** — switch to VLESS+WS+TLS, point a domain at CF in proxy mode, configure CF to origin to your VPS
+4. **Switch protocol** — Hysteria2 (QUIC) and shadowsocks-2022 are not yet widely detected
+
+See `docs/ADMIN-GUIDE.md` "Troubleshooting > VLESS Reality not connecting" for diagnostics.
 
 ## 8. Troubleshooting
 

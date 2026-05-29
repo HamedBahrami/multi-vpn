@@ -2,18 +2,25 @@
 
 This server provides multiple VPN/proxy protocols. If one gets blocked, try another.
 
-**Priority order** (try these first):
-1. VLESS Reality — best anti-detection, looks like normal HTTPS
-2. TrustTunnel — HTTP/2 + QUIC tunneling
-3. Paqet — raw packet proxy, bypasses DPI
-4. SSH Tunnel — simple, works on most networks
-5. Tailscale — WireGuard-based, good for general use
+**Priority order** (try these first, in 2025 order for Iranian networks):
+1. **VLESS+WebSocket via Cloudflare** — most resilient against current Iranian DPI; uses CF IPs which ISPs rarely blanket-block
+2. VLESS Reality — was #1 until 2024; recent Iranian DPI fingerprints the TLS pattern in 2025
+3. Hysteria2 — fast (UDP/QUIC) where UDP works, but many ISPs now block non-WireGuard UDP
+4. TrustTunnel — HTTP/2 + QUIC tunneling
+5. Trojan — TCP+TLS fallback; works but slow on high-latency paths (TCP-meltdown)
+6. Paqet — raw packet proxy; small requests pass but DPI now drops payload-carrying frames
+7. SSH Tunnel — simple, works on most networks
+8. Tailscale — WireGuard-based, good baseline; the protocol most likely to be whitelisted by aggressive ISPs
+
+Mobile carriers in Iran often have looser filtering than fixed-line ISPs — a config that times out on home Wi-Fi may work fine on mobile data. Test both when in doubt.
 
 ---
 
 ## 1. VLESS Reality (Recommended)
 
 VLESS with Reality disguises your traffic as a normal HTTPS connection to a legitimate website. It's currently the hardest protocol for censors to detect.
+
+> **2025 note:** Iranian DPI started fingerprinting Reality's TLS pattern in late 2024 and detection has improved through 2025. If Reality stops working (TCP connects but HTTPS hangs), ask admin to try a different SNI or move the inbound off port 443. If it still doesn't work, fall back to TrustTunnel or Paqet on the same server — both protocols below.
 
 ### Android — v2rayNG / Hiddify
 

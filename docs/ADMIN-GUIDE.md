@@ -2,14 +2,16 @@
 
 ## Port Allocation
 
-| Port | Protocol | Transport |
-|------|----------|-----------|
-| 22 | SSH | TCP — tunneling + admin |
-| 443 | VLESS Reality | TCP — 3x-ui managed |
-| 2053 | 3x-ui admin panel | TCP — restrict to admin IP |
-| 8443 | TrustTunnel | TCP + UDP (QUIC) |
-| 9999 | Paqet | Raw packets (pcap) |
-| 41641 | Tailscale | UDP (WireGuard) |
+| Port | Protocol | Transport | Notes |
+|------|----------|-----------|-------|
+| 22 | SSH | TCP | Tunneling + admin |
+| 443 | VLESS Reality OR VLESS+WS+CF | TCP | 3x-ui managed; pick one or move CF-fronted version off 443 |
+| 2053 | 3x-ui admin panel | TCP | Restrict to admin IP via UFW; CF-supported port too |
+| 2087, 2096 | Optional alt-HTTPS for fronted inbounds | TCP/UDP | All in CF Free's supported HTTPS port list |
+| 8443 | TrustTunnel | TCP + UDP (QUIC) | CF-supported port |
+| 9999 | Paqet | Raw packets (pcap) | Increasingly DPI-detected in 2025 |
+| (varies) | Hysteria2 | UDP | Separate `hysteria-server` binary (not xray). UDP/QUIC pattern; whether it survives DPI depends on the network. |
+| 41641 | Tailscale | UDP (WireGuard) | Often whitelisted by ISPs that block other UDP |
 
 ---
 
@@ -249,6 +251,88 @@ echo "Remove devices at https://login.tailscale.com/admin/machines"
 
 ---
 
+## Adding Hysteria2 (not via xray/3x-ui)
+
+xray-core does NOT implement Hysteria2 — `xray-linux-amd64` rejects the inbound with `unknown config id: hysteria2`. Hysteria2 needs the separate `hysteria-server` binary from the `apernet/hysteria` project.
+
+```bash
+# install (creates /usr/local/bin/hysteria + /etc/hysteria/config.yaml + systemd unit)
+curl -fsSL https://get.hy2.sh/ | bash
+```
+
+The default systemd unit runs as user `hysteria`, not root, so cert files in `/etc/x-ui/cert` (which are root-owned) won't be readable. Put dedicated copies in `/etc/hysteria/` with the right ownership:
+
+```bash
+cp /etc/letsencrypt/live/<domain>/fullchain.pem /etc/hysteria/cert.crt
+cp /etc/letsencrypt/live/<domain>/privkey.pem   /etc/hysteria/cert.key
+chown hysteria:hysteria /etc/hysteria/cert.*
+chmod 644 /etc/hysteria/cert.crt
+chmod 640 /etc/hysteria/cert.key
+```
+
+Minimal `config.yaml`:
+```yaml
+listen: :2096               # or any UDP port; CF-supported HTTPS ports are 443/2053/2083/2087/2096/8443
+
+tls:
+  cert: /etc/hysteria/cert.crt
+  key: /etc/hysteria/cert.key
+
+obfs:
+  type: salamander          # disguises QUIC pattern
+  salamander:
+    password: <random-22-char-string>
+
+auth:
+  type: password
+  password: <random-22-char-string>
+
+masquerade:                 # serve fake HTTPS to probes
+  type: proxy
+  proxy:
+    url: https://www.bing.com/
+    rewriteHost: true
+```
+
+Add a deploy-hook to keep certs in sync when LE renews:
+```bash
+mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+cat > /etc/letsencrypt/renewal-hooks/deploy/copy-to-services.sh <<'EOF'
+#!/bin/bash
+SRC=/etc/letsencrypt/live/<domain>
+cp "$SRC/fullchain.pem" /etc/hysteria/cert.crt
+cp "$SRC/privkey.pem"   /etc/hysteria/cert.key
+chown hysteria:hysteria /etc/hysteria/cert.*
+systemctl restart hysteria-server
+EOF
+chmod +x /etc/letsencrypt/renewal-hooks/deploy/copy-to-services.sh
+```
+
+Client URI (Hiddify Next has the cleanest hy2 support; v2rayNG parses it in newer versions):
+```
+hysteria2://<auth-password>@<domain>:2096?sni=<domain>&obfs=salamander&obfs-password=<obfs-password>#<remark>
+```
+
+#### When Hysteria2 doesn't connect through restrictive networks
+
+Some ISPs block all UDP except WireGuard-pattern (the only thing Tailscale/WG sends). Symptoms: client says "Connected" but no traffic flows, server logs are empty, `tcpdump -i ens3 "udp port <port>"` shows 0 inbound packets. You can verify the server is healthy with a loopback test:
+
+```bash
+cat > /tmp/hy-client.yaml <<EOF
+server: 127.0.0.1:<port>
+auth: <auth-password>
+tls: { sni: <domain>, ca: /etc/letsencrypt/live/<domain>/chain.pem }
+obfs: { type: salamander, salamander: { password: <obfs-password> } }
+socks5: { listen: 127.0.0.1:11081 }
+EOF
+hysteria client -c /tmp/hy-client.yaml &
+curl -x socks5h://127.0.0.1:11081 https://1.1.1.1     # 200/301 = server works
+```
+
+If loopback works but real clients can't reach it: it's the network, not the config — switch users to Cloudflare-fronted VLESS+WS or just keep them on Trojan/Tailscale.
+
+---
+
 ## Troubleshooting
 
 ### 3x-ui panel not accessible
@@ -271,6 +355,78 @@ curl -v --resolve www.google.com:443:<server-ip> https://www.google.com
 journalctl -u x-ui -f
 ```
 
+#### Symptom: TCP connects but TLS handshake stalls (Reality response not ACKed)
+Check `ss -tn state established '( dport = :443 )'` — if you see large `Send-Q` values on connections to clients, the server is sending the Reality response but the client side isn't acknowledging. This is almost always **client-side DPI fingerprinting the Reality TLS pattern**, not a server bug. Server logs will be silent.
+
+Mitigations to try, in order:
+1. **Change the Reality SNI** to a target with a smaller cert chain — `gateway.icloud.com`, `www.cloudflare.com`, `discord.com`. Edit the inbound in 3x-ui (both `realitySettings.serverNames` and `realitySettings.settings.serverName`), restart x-ui.
+2. **Move the inbound off port 443** to something less scrutinised (`2087`, `2096`, `8443`). DPI policy is sometimes port-specific.
+3. **Switch the IP off the ISP's blacklist** — once an IP is fingerprinted by an aggressive DPI, even a fresh protocol from the same IP often fails. Rotate the VPS IP if possible.
+4. **Front behind Cloudflare** — switch to VLESS+WS+TLS, point a domain at Cloudflare proxy mode, configure CF to origin to your VPS. The DPI sees only Cloudflare IPs.
+5. **Try a different protocol** (Hysteria2 over QUIC, shadowsocks-2022). Reality detection has improved markedly in Iranian DPI through 2024–2025; a network that detects it may not yet detect QUIC-based tunnels.
+
+Reality on its own is no longer guaranteed to evade Iranian DPI — design for fallbacks.
+
+### VLESS+WebSocket behind Cloudflare (the post-Reality answer)
+
+When direct VLESS or Reality stops getting through, Cloudflare fronting is the most reliable next step. Idea: client connects to a Cloudflare IP (CF whitelisted by most ISPs because of how much legit traffic it serves), CF terminates user TLS, then proxies WebSocket-wrapped VLESS to your origin VPS over CF's backbone. ISP sees only CF IPs and CF SNIs.
+
+**One-time setup:**
+
+1. **Move your domain to Cloudflare** — free plan is enough. Change registrar nameservers to the two CF ones. DNS propagates in minutes.
+2. **DNS records in CF:**
+   - Apex / existing subdomain used by direct-access services (e.g., TrustTunnel): **DNS-only (gray cloud)** to keep direct access working.
+   - New subdomain for the fronted tunnel (e.g., `cdn.<your-domain>`): **Proxied (orange cloud)** A-record to your VPS IP. Keep it **1-level** (`cdn.example.com`, not `cdn.sub.example.com`) so Universal SSL covers it on Free tier.
+3. **SSL/TLS → Overview** → set encryption mode **Full (strict)**.
+4. **SSL/TLS → Origin Server** → **Create Certificate** (15-year cert, covers `*.<domain>` and `<domain>` by default). Save cert and private key — they go on the VPS.
+5. **On the VPS**, install the origin cert (e.g., `/etc/x-ui/cert/cf-origin.{crt,key}`, 0600/0644 perms).
+6. **In 3x-ui**, add a VLESS+WS+TLS inbound:
+   - Port: any CF-supported HTTPS port for Free tier — 443, 2053, 2083, 2087, 2096, 8443
+   - Transport: `ws`, path: random (e.g., `/wsm-<8-hex>`) for stealth
+   - Host header: your CF-proxied subdomain
+   - TLS: enabled, server name = your CF-proxied subdomain, cert = the origin cert
+   - Flow: empty (xtls-rprx-vision is TCP-only, doesn't work with WS)
+
+**Client URI** (v2rayNG / V2Box / Hiddify Next):
+```
+vless://<uuid>@<cdn-subdomain>:443?type=ws&path=%2F<ws-path>&host=<cdn-subdomain>&security=tls&sni=<cdn-subdomain>&fp=chrome&encryption=none#<remark>
+```
+
+**Verification from a third machine** (rules out cert/path bugs before bothering the user):
+```bash
+curl -sI https://<cdn-subdomain>/                                   # expect 404 or some response from origin
+curl -sI -H "Connection: Upgrade" -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+  https://<cdn-subdomain>/<ws-path>                                 # expect 101 Switching Protocols
+```
+A `101` confirms the full chain (DNS → CF → origin TLS → WS upgrade) works.
+
+**Common CF-fronting gotchas:**
+- Universal SSL only covers `<domain>` and `*.<domain>` (one level). `cdn.sub.example.com` triggers a cert mismatch and 15-second silent timeouts. Use one-level subdomains.
+- Free plan doesn't allow custom ports outside the supported list. Stick to 443/2053/2083/2087/2096/8443 for HTTPS, or 80/8080/8880/2052/2082/2086/2095 for plain HTTP.
+- `xtls-rprx-vision` flow does NOT work over WebSocket — leave flow empty for VLESS+WS.
+
+#### When even CF fronting fails (ISP does aggressive SNI whitelisting)
+
+Some restrictive ISPs whitelist a small list of well-known SNIs (`www.cloudflare.com`, `www.google.com`, etc.) and drop everything else, even other CF subdomains. Telltale signs:
+- `https://www.cloudflare.com` works in the user's browser, but `https://<your-cdn-subdomain>` times out after 15s
+- `https://1.1.1.1` (bare-IP TLS, no SNI) also times out
+
+Fixes, in order of likelihood:
+1. **Encrypted Client Hello (ECH)** — CF publishes ECH config in DNS HTTPS records by default. Clients that support ECH (Hiddify Next recent versions) hide the SNI from the ISP. Requires the client to use DoH to fetch the HTTPS record, which means the ISP must also allow at least one DoH endpoint. If ISP blocks `cloudflare-dns.com` too, try `https://doh.opendns.com/dns-query`, `https://dns.adguard-dns.com/dns-query`, or `https://dns.nextdns.io/dns-query`.
+2. **Different network** — mobile carriers in censored countries often have looser SNI filtering than landline ISPs. Users on mobile data may not need any of this.
+3. **CDN diversification** — set up a parallel inbound fronted by Fastly or a different CDN. Some ISP whitelists are CF-specific; a different CDN's SNI pattern may pass.
+
+#### Symptom: 3x-ui v3.x inserts inbound but xray config shows `"clients": null`
+v3.x stores clients in the separate `clients` table, not embedded in `inbounds.settings`. After inserting an inbound via SQL, also insert the client and link via `client_inbounds`:
+```sql
+INSERT INTO clients (email, sub_id, uuid, flow, security, enable, created_at, updated_at)
+VALUES (...);
+INSERT INTO client_inbounds (client_id, inbound_id, flow_override, created_at)
+VALUES ((SELECT id FROM clients WHERE uuid='...'), <inbound_id>, '', strftime('%s','now'));
+```
+Then `systemctl restart x-ui` to regenerate `/usr/local/x-ui/bin/config.json`.
+
 ### TrustTunnel not starting
 ```bash
 # Check TLS config
@@ -285,9 +441,10 @@ journalctl -u trusttunnel -f
 
 ### Paqet not working
 ```bash
-# Check iptables rules exist
+# Check iptables rules exist AND are persistent
 iptables -t raw -L -n | grep 9999
 iptables -t mangle -L -n | grep 9999
+dpkg -l iptables-persistent | grep ^ii   # MUST be installed or rules vanish on reboot
 
 # Check pcap is working
 tcpdump -i <interface> port 9999 -c 5
@@ -295,6 +452,24 @@ tcpdump -i <interface> port 9999 -c 5
 # Logs
 journalctl -u paqet -f
 ```
+
+#### Critical: scope the NOTRACK rules to the server's own IP
+The setup-guide recipe uses `-p tcp --dport 9999 -j NOTRACK` with no destination. On a server that **also acts as a NAT gateway** (Tailscale exit node, WireGuard concentrator, etc.), this rule matches **forwarded** traffic with dport 9999 too — and NOTRACK breaks MASQUERADE because the reverse-NAT has no state to match against. The same applies to any port you may add (e.g., 443 if you also run Reality/web on it).
+
+Use the scoped form on multi-role servers:
+```bash
+iptables -t raw    -A PREROUTING -d <SERVER_IP>/32 -p tcp --dport 9999 -j NOTRACK
+iptables -t raw    -A OUTPUT     -s <SERVER_IP>/32 -p tcp --sport 9999 -j NOTRACK
+iptables -t mangle -A OUTPUT     -s <SERVER_IP>/32 -p tcp --sport 9999 --tcp-flags RST RST -j DROP
+```
+
+Symptom of the broken-broad rule: HTTPS through the Tailscale/WG exit times out, but ICMP/SSH still work. Tcpdump on `ens3` shows outbound SYNs from the exit but no replies make it back to the client.
+
+#### Symptom: client says "tunnel works briefly then dies with closed pipe"
+Almost always the NOTRACK rule was removed (often by a reboot without `iptables-persistent`). The kernel then sees the raw KCP "TCP" packets as unsolicited and sends RST to the client after the first ACK, killing the smux session. Re-add the rules and save with `netfilter-persistent save`.
+
+#### Symptom: small HTTP requests succeed but HTTPS / large transfers fail
+If iptables rules ARE in place and `tcpdump` on the server shows the client's packets arriving but only the small KCP control frames flow (no large data segments), the client-side ISP is fingerprinting the KCP-over-fake-TCP pattern. Paqet alone cannot evade this; switch the user to VLESS or Hysteria2 on the same VPS.
 
 ### High CPU / Memory
 ```bash
